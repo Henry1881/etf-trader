@@ -171,7 +171,40 @@ def generate_report(target_date: str = None):
         print(f"\n  报告已保存: {filepath}")
         print(f"  数据质量: {quality}/100")
     else:
-        print("\n  无 ETF 数据，未能生成报告")
+        # 即使数据获取失败，也生成一个错误报告（方便排查）
+        import os
+        os.makedirs("reports", exist_ok=True)
+        date_str = target_date or datetime.now().strftime("%Y%m%d")
+        error_report = f"""# ETF每日分析报告
+
+**分析日期**: {date_str}
+
+## ⚠️ 数据获取失败
+
+云端报告生成时无法获取 ETF 数据。
+
+### 可能原因
+1. akshare 在 GitHub Actions 服务器（美国）上无法访问东方财富 API
+2. 网络超时
+3. 非交易日（周末/节假日）
+
+### 警告信息
+"""
+        for w in all_warnings:
+            error_report += f"- {w}\n"
+        error_report += f"\n生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n"
+
+        filepath = os.path.join("reports", f"daily_report_{date_str}.md")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(error_report)
+        print(f"\n  错误报告已保存: {filepath}")
+        print(f"  警告数: {len(all_warnings)}")
+
+    # 调试：列出 reports/ 目录内容
+    print("\n  === reports/ 目录内容 ===")
+    import subprocess
+    result = subprocess.run(["ls", "-la", "reports/"], capture_output=True, text=True)
+    print(result.stdout or result.stderr or "  (空)")
 
 
 if __name__ == "__main__":
