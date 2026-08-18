@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 # 配置：注册 GitHub 后填入你的仓库信息
 # 格式：https://raw.githubusercontent.com/{用户名}/{仓库名}/{分支}/
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/USER/REPO/main/"
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/henry1881/etf-trader/main/"
 
 # 本地报告目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
