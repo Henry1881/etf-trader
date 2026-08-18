@@ -1,0 +1,56 @@
+etf_list:
+  - symbol: "588170"
+    name: "科创半导体ETF华夏"
+    exchange: "sh"
+  - symbol: "159611"
+    name: "广发中证全指电力ETF"
+    exchange: "sz"
+  - symbol: "159227"
+    name: "华夏国证航天航空ETF"
+    exchange: "sz"
+  - symbol: "159272"
+    name: "机器人ETF富国"
+    exchange: "sz"
+  - symbol: "159622"
+    name: "创新药ETF沪港深"
+    exchange: "sz"
+
+# 通达信 MCP 配置
+tdx_api_key: "TDX-33bd9b128f6d09470e9c49bf30722a8a"
+
+indicators:
+  ma:
+    short_period: 5
+    medium_period: 20
+    long_period: 60
+  macd:
+    fast_period: 12
+    slow_period: 26
+    signal_period: 9
+  rsi:
+    period: 14
+    oversold: 30
+    overbought: 70
+  bollinger:
+    period: 20
+    num_std: 2
+
+trading_rules:
+  ma_crossover:
+    enabled: true
+    require_volume_confirm: true
+  macd_signal:
+    enabled: true
+  rsi_signal:
+    enabled: true
+  bollinger_signal:
+    enabled: true
+
+schedule:
+  daily_report_time: "20:00"
+  weekly_report_day: "Monday"
+
+output:
+  console: true
+  markdown: true
+  report_dir: "./reports"
