@@ -43,13 +43,32 @@ ETF_CONFIG = {
 }
 
 
-def fetch_kline(symbol: str, count: int = 100) -> pd.DataFrame:
-    """用 akshare 拉取真实日K线（带重试）"""
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
+def fetch_kline(symbol: str, exchange: str, count: int = 100) -> pd.DataFrame:
+    """用 akshare 拉取真实日K线（带重试），优先新浪数据源，东方财富备选"""
+    sina_symbol = f"{exchange}{symbol}"  # 如 sh588170, sz159611
 
     for attempt in range(4):
+        # 优先用新浪数据源（国内访问更稳定）
         try:
+            raw = ak.fund_etf_hist_sina(symbol=sina_symbol)
+            if raw is not None and not raw.empty:
+                df = raw.copy()
+                df["date"] = pd.to_datetime(df["date"])
+                for c in ["open", "high", "low", "close", "volume", "amount"]:
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors="coerce")
+                df = df.sort_values("date").reset_index(drop=True)
+                cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"]
+                        if c in df.columns]
+                df = df[cols]
+                return df.tail(count).reset_index(drop=True)
+        except Exception as e:
+            print(f"  [{symbol}] 新浪第{attempt+1}次失败: {type(e).__name__}")
+
+        # 备选：东方财富
+        try:
+            end_date = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
             raw = ak.fund_etf_hist_em(
                 symbol=symbol, period="daily",
                 start_date=start_date, end_date=end_date, adjust=""
@@ -71,8 +90,9 @@ def fetch_kline(symbol: str, count: int = 100) -> pd.DataFrame:
                 df = df[cols]
                 return df.tail(count).reset_index(drop=True)
         except Exception as e:
-            print(f"  [{symbol}] 第{attempt+1}次失败: {type(e).__name__}: {e}")
-            time.sleep(3 + attempt * 2)
+            print(f"  [{symbol}] 东方财富第{attempt+1}次失败: {type(e).__name__}")
+
+        time.sleep(3 + attempt * 2)
     return pd.DataFrame()
 
 
@@ -97,7 +117,7 @@ def generate_report(target_date: str = None):
     for symbol, info in ETF_CONFIG.items():
         try:
             print(f"\n  处理 {symbol} ({info['name']})...")
-            df = fetch_kline(symbol, count=100)
+            df = fetch_kline(symbol, info["exchange"], count=100)
             if df.empty:
                 all_warnings.append(f"{symbol}: akshare 获取失败")
                 continue
