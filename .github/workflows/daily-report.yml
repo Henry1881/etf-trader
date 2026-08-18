@@ -1,0 +1,56 @@
+# ETF 每日报告 - GitHub Actions 云端定时生成
+# 功能：每个交易日 20:00（北京时间）在云端自动生成报告并推送到仓库
+# 本地开机后运行 download_reports.py 自动下载最新报告
+name: ETF Daily Report
+
+on:
+  # 定时触发：UTC 12:00 = 北京时间 20:00（A 股收盘后）
+  schedule:
+    - cron: '0 12 * * 1-5'  # 周一到周五
+  # 手动触发（用于测试和补生成）
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: '补生成日期 YYYYMMDD（留空=今天）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write  # 允许推送报告到仓库
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install akshare pandas pyyaml -q
+
+    - name: Generate report
+      env:
+        TARGET_DATE: ${{ github.event.inputs.target_date }}
+      run: |
+        if [ -n "$TARGET_DATE" ]; then
+          python generate_report_cloud.py "$TARGET_DATE"
+        else
+          python generate_report_cloud.py
+        fi
+
+    - name: Commit and push report
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -f reports/*.md || true
+        git add -f logs/*.log || true
+        git diff --staged --quiet || git commit -m "daily report $(date -u +%Y%m%d)"
+        git push
