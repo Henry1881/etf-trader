@@ -43,11 +43,57 @@ ETF_CONFIG = {
 }
 
 
-def fetch_kline(symbol: str, exchange: str, count: int = 100) -> pd.DataFrame:
-    """用 akshare 拉取真实日K线（带重试），优先新浪数据源，东方财富备选"""
-    sina_symbol = f"{exchange}{symbol}"  # 如 sh588170, sz159611
+def apply_forward_adjust(df: pd.DataFrame) -> pd.DataFrame:
+    """对未复权数据做前复权处理（检测除权除息日并调整历史价格）"""
+    if df.empty or len(df) < 2:
+        return df
 
-    for attempt in range(4):
+    price_cols = ["open", "high", "low", "close"]
+    df = df.sort_values("date").reset_index(drop=True).copy()
+
+    # 检测除权日：当天开盘价与前一天收盘价差异超过 20%
+    adjust_factors = [1.0]  # 最新一天不需要调整
+    for i in range(1, len(df)):
+        prev_close = df.iloc[i - 1]["close"]
+        curr_open = df.iloc[i]["open"]
+        if prev_close > 0 and abs(curr_open / prev_close - 1) > 0.20:
+            # 除权因子 = 当天开盘价 / 前一天收盘价
+            factor = curr_open / prev_close
+            print(f"    检测到除权日 {df.iloc[i]['date'].strftime('%Y-%m-%d')}: "
+                  f"前收={prev_close:.4f}, 今开={curr_open:.4f}, 因子={factor:.4f}")
+            adjust_factors.append(factor)
+        else:
+            adjust_factors.append(1.0)
+
+    # 从最新一天往前累积复权因子
+    # 如果有多天除权，需要累积
+    cumulative = [1.0] * len(df)
+    cum_factor = 1.0
+    for i in range(len(df) - 1, -1, -1):
+        cum_factor *= adjust_factors[i]
+        cumulative[i] = cum_factor
+
+    # 应用复权因子
+    for j, col in enumerate(price_cols):
+        if col in df.columns:
+            df[col] = df[col] * cumulative
+
+    return df
+
+
+def fetch_kline(symbol: str, exchange: str, count: int = 100,
+                 expected_date: pd.Timestamp = None) -> pd.DataFrame:
+    """用 akshare 拉取真实日K线（带重试和数据时效性校验）
+    优先新浪数据源，东方财富备选
+    新浪数据源返回未复权数据，需手动做前复权处理
+
+    关键改进：检查最后一行日期是否与 expected_date 一致
+    若不一致说明数据源未刷新当天数据，重试或切换备用源
+    """
+    sina_symbol = f"{exchange}{symbol}"  # 如 sh588170, sz159611
+    max_attempts = 6  # 增加重试次数，给数据源更多时间刷新
+
+    for attempt in range(max_attempts):
         # 优先用新浪数据源（国内访问更稳定）
         try:
             raw = ak.fund_etf_hist_sina(symbol=sina_symbol)
@@ -61,17 +107,35 @@ def fetch_kline(symbol: str, exchange: str, count: int = 100) -> pd.DataFrame:
                 cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"]
                         if c in df.columns]
                 df = df[cols]
+
+                # 前复权处理（新浪数据源返回未复权数据）
+                df = apply_forward_adjust(df)
+
+                # === 数据时效性校验 ===
+                if expected_date is not None and not df.empty:
+                    last_date = df["date"].iloc[-1]
+                    if last_date.date() != expected_date.date():
+                        print(f"  [{symbol}] 时效校验失败: 期望 {expected_date.strftime('%Y-%m-%d')}, "
+                              f"实际最后日期 {last_date.strftime('%Y-%m-%d')} (第{attempt+1}次)")
+                        # 数据未刷新，等待重试
+                        if attempt < max_attempts - 1:
+                            time.sleep(15 + attempt * 5)  # 逐步增加等待时间
+                            continue
+                        else:
+                            print(f"  [{symbol}] 警告: 数据源未刷新，将使用最新可用数据")
+                    else:
+                        print(f"  [{symbol}] 时效校验通过: 最后一行 {last_date.strftime('%Y-%m-%d')}")
                 return df.tail(count).reset_index(drop=True)
         except Exception as e:
             print(f"  [{symbol}] 新浪第{attempt+1}次失败: {type(e).__name__}")
 
-        # 备选：东方财富
+        # 备选：东方财富（用前复权）
         try:
             end_date = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
             raw = ak.fund_etf_hist_em(
                 symbol=symbol, period="daily",
-                start_date=start_date, end_date=end_date, adjust=""
+                start_date=start_date, end_date=end_date, adjust="qfq"
             )
             if raw is not None and not raw.empty:
                 rename = {
@@ -88,11 +152,24 @@ def fetch_kline(symbol: str, exchange: str, count: int = 100) -> pd.DataFrame:
                 cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"]
                         if c in df.columns]
                 df = df[cols]
+                # === 数据时效性校验 ===
+                if expected_date is not None and not df.empty:
+                    last_date = df["date"].iloc[-1]
+                    if last_date.date() != expected_date.date():
+                        print(f"  [{symbol}] 东方财富时效校验失败: 期望 {expected_date.strftime('%Y-%m-%d')}, "
+                              f"实际 {last_date.strftime('%Y-%m-%d')}")
+                        if attempt < max_attempts - 1:
+                            time.sleep(15 + attempt * 5)
+                            continue
+                        else:
+                            print(f"  [{symbol}] 警告: 东方财富数据源未刷新")
+                    else:
+                        print(f"  [{symbol}] 东方财富时效校验通过")
                 return df.tail(count).reset_index(drop=True)
         except Exception as e:
             print(f"  [{symbol}] 东方财富第{attempt+1}次失败: {type(e).__name__}")
 
-        time.sleep(3 + attempt * 2)
+        time.sleep(5 + attempt * 3)
     return pd.DataFrame()
 
 
@@ -103,9 +180,20 @@ def generate_report(target_date: str = None):
     if target_date:
         target_ts = pd.Timestamp(target_date)
         print(f"  补生成模式: {target_ts.strftime('%Y-%m-%d')}")
+        expected_date = target_ts  # 期望最后交易日为指定日期
     else:
         target_ts = None
         print(f"  正常模式: 今日报告")
+        # 期望最后交易日为今日（仅在交易日 15:30 后才合理）
+        expected_date = pd.Timestamp(now.date())
+        # 若今日是周末（周六/周日），则期望最后一个交易日为上周五
+        # GitHub Actions 在 UTC 12:00 = 北京时间 20:00 运行，已经过收盘时间
+        weekday = now.weekday()
+        if weekday == 5:  # 周六
+            expected_date = pd.Timestamp(now.date()) - pd.Timedelta(days=1)  # 周五
+        elif weekday == 6:  # 周日
+            expected_date = pd.Timestamp(now.date()) - pd.Timedelta(days=2)  # 周五
+    print(f"  期望最后交易日: {expected_date.strftime('%Y-%m-%d')}")
 
     indicators = TechnicalIndicators()
     signal_generator = SignalGenerator()
@@ -113,14 +201,26 @@ def generate_report(target_date: str = None):
 
     etf_results = {}
     all_warnings = []
+    stale_data_etfs = []  # 记录数据未刷新的ETF
 
     for symbol, info in ETF_CONFIG.items():
         try:
             print(f"\n  处理 {symbol} ({info['name']})...")
-            df = fetch_kline(symbol, info["exchange"], count=100)
+            df = fetch_kline(symbol, info["exchange"], count=100,
+                             expected_date=expected_date)
             if df.empty:
                 all_warnings.append(f"{symbol}: akshare 获取失败")
                 continue
+
+            # 数据时效性最终检查（即使重试用尽，也要记录警告）
+            if expected_date is not None and not df.empty:
+                last_date = df["date"].iloc[-1]
+                if last_date.date() != expected_date.date():
+                    stale_data_etfs.append(symbol)
+                    all_warnings.append(
+                        f"{symbol}: 数据时效性问题 - 期望 {expected_date.strftime('%Y-%m-%d')}, "
+                        f"实际最后日期 {last_date.strftime('%Y-%m-%d')}"
+                    )
 
             # 补生成模式：截取到目标日期
             if target_ts:
@@ -174,13 +274,36 @@ def generate_report(target_date: str = None):
             all_warnings.append(f"{symbol}: {e}")
 
     if etf_results:
-        quality = max(50, 100 - len(all_warnings) * 15)
+        # 数据质量扣分：数据时效性问题严重扣分（每个 -15）
+        quality = max(30, 100 - len(all_warnings) * 15)
+        if stale_data_etfs:
+            # 数据时效性问题更严重，额外扣分
+            quality = max(20, quality - len(stale_data_etfs) * 15)
+
+        # 最后交易日：取所有ETF中最常见的日期
+        all_last_dates = [result["data"]["date"].iloc[-1] for result in etf_results.values()]
+        if all_last_dates:
+            from collections import Counter
+            date_counter = Counter(d.date() for d in all_last_dates)
+            majority_date = date_counter.most_common(1)[0][0]
+            last_trade_date = pd.Timestamp(majority_date).strftime("%Y-%m-%d")
+        else:
+            last_trade_date = "未知"
+
+        warnings_list = ["云端生成，基于 akshare 真实日K线"]
+        if stale_data_etfs:
+            warnings_list.append(
+                f"⚠️ 数据时效性问题: {', '.join(stale_data_etfs)} 数据可能未刷新到当日"
+            )
+        warnings_list.extend(all_warnings[:3])
+
         data_meta = {
             "source": "akshare(东方财富API) - GitHub Actions 云端生成",
-            "last_trade_date": list(etf_results.values())[0]["data"]["date"].iloc[-1].strftime("%Y-%m-%d"),
+            "last_trade_date": last_trade_date,
+            "expected_date": expected_date.strftime("%Y-%m-%d") if expected_date else None,
             "validated": True,
             "quality_score": quality,
-            "warnings": ["云端生成，基于 akshare 真实日K线"] + all_warnings[:3]
+            "warnings": warnings_list
         }
         report = report_generator.generate_daily_report(etf_results, data_meta)
 
@@ -220,11 +343,20 @@ def generate_report(target_date: str = None):
         print(f"\n  错误报告已保存: {filepath}")
         print(f"  警告数: {len(all_warnings)}")
 
-    # 调试：列出 reports/ 目录内容
+    # 调试：列出 reports/ 目录内容（跨平台）
     print("\n  === reports/ 目录内容 ===")
-    import subprocess
-    result = subprocess.run(["ls", "-la", "reports/"], capture_output=True, text=True)
-    print(result.stdout or result.stderr or "  (空)")
+    try:
+        import os
+        if os.path.exists("reports"):
+            files = sorted(os.listdir("reports"))
+            for f in files:
+                fp = os.path.join("reports", f)
+                size = os.path.getsize(fp) if os.path.isfile(fp) else 0
+                print(f"  {f}  ({size} bytes)")
+        else:
+            print("  (reports 目录不存在)")
+    except Exception as e:
+        print(f"  (列目录错误: {e})")
 
 
 if __name__ == "__main__":
