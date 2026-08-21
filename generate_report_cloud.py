@@ -273,12 +273,15 @@ def generate_report(target_date: str = None):
             print(f"    错误: {e}")
             all_warnings.append(f"{symbol}: {e}")
 
-    if etf_results:
-        # 数据质量扣分：数据时效性问题严重扣分（每个 -15）
-        quality = max(30, 100 - len(all_warnings) * 15)
-        if stale_data_etfs:
-            # 数据时效性问题更严重，额外扣分
-            quality = max(20, quality - len(stale_data_etfs) * 15)
+    # === 关键决策：数据未刷新到当日的 ETF 超过 2 只时，不生成误导性报告 ===
+    stale_count = len(stale_data_etfs)
+    total_etfs = len(ETF_CONFIG)
+    # 阈值：超过 2 只（含）未刷新，或未刷新比例 >= 50%，判定为数据源未就绪
+    data_stale = stale_count >= 2 or (total_etfs > 0 and stale_count / total_etfs >= 0.5)
+
+    if etf_results and not data_stale:
+        # 数据新鲜度 OK，生成正常报告
+        quality = max(50, 100 - len(all_warnings) * 15)
 
         # 最后交易日：取所有ETF中最常见的日期
         all_last_dates = [result["data"]["date"].iloc[-1] for result in etf_results.values()]
@@ -314,25 +317,46 @@ def generate_report(target_date: str = None):
         print(f"\n  报告已保存: {filepath}")
         print(f"  数据质量: {quality}/100")
     else:
-        # 即使数据获取失败，也生成一个错误报告（方便排查）
+        # 数据未就绪，生成明确的错误报告，避免"看起来正确但内容是昨日数据"的误导
         import os
         os.makedirs("reports", exist_ok=True)
         date_str = target_date or datetime.now().strftime("%Y%m%d")
-        error_report = f"""# ETF每日分析报告
+        if not etf_results:
+            title = "## ⚠️ 数据获取失败"
+            reason = "云端报告生成时无法获取 ETF 数据。"
+        else:
+            title = "## ⚠️ 数据源未就绪（数据为前一交易日）"
+            reason = (
+                f"新浪/东财 API 在 GitHub Actions 服务器（美国）上尚未刷新到 "
+                f"{expected_date.strftime('%Y-%m-%d') if expected_date else '当日'} 的收盘数据，"
+                f"当前 {stale_count}/{total_etfs} 只 ETF 数据停留在前一交易日。"
+                f"\n\n**请等待次日本地同步补全，或手动触发 GitHub Actions Workflow。**"
+            )
+        error_report = f"""# ⚠️ ETF每日分析报告 - 数据未就绪
 
 **分析日期**: {date_str}
 
-## ⚠️ 数据获取失败
+{title}
 
-云端报告生成时无法获取 ETF 数据。
+{reason}
 
-### 可能原因
-1. akshare 在 GitHub Actions 服务器（美国）上无法访问东方财富 API
-2. 网络超时
-3. 非交易日（周末/节假日）
+### 原因说明
+1. GitHub Actions 服务器部署在美国东/西海岸
+2. 新浪财经 / 东方财富 API 在海外的数据刷新比国内慢 1~3 小时
+3. 如果此时强行生成报告会混入前一天的收盘价，造成交易建议严重错误
 
-### 警告信息
+### 数据时效性检查结果
 """
+        for sym in ETF_CONFIG.keys():
+            result = etf_results.get(sym)
+            if result is not None:
+                last_dt = result["data"]["date"].iloc[-1].strftime("%Y-%m-%d")
+                close_px = result["data"]["close"].iloc[-1]
+                mark = " ❌" if sym in stale_data_etfs else " ✅"
+                error_report += f"- **{sym}**: 最后日期 {last_dt}, 收盘价={close_px:.4f}{mark}\n"
+            else:
+                error_report += f"- **{sym}**: 获取失败 ❌\n"
+        error_report += "\n### 警告信息\n"
         for w in all_warnings:
             error_report += f"- {w}\n"
         error_report += f"\n生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n"
@@ -340,8 +364,8 @@ def generate_report(target_date: str = None):
         filepath = os.path.join("reports", f"daily_report_{date_str}.md")
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(error_report)
-        print(f"\n  错误报告已保存: {filepath}")
-        print(f"  警告数: {len(all_warnings)}")
+        print(f"\n  数据未就绪报告已保存: {filepath}")
+        print(f"  未刷新 ETF: {stale_count}/{total_etfs}  警告数: {len(all_warnings)}")
 
     # 调试：列出 reports/ 目录内容（跨平台）
     print("\n  === reports/ 目录内容 ===")
