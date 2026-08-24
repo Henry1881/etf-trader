@@ -173,6 +173,33 @@ def fetch_kline(symbol: str, exchange: str, count: int = 100,
     return pd.DataFrame()
 
 
+def report_already_ready(date_str: str) -> bool:
+    """门禁检查：指定日期的报告是否已经生成且数据合格（非"数据未就绪"错误报告）。
+    冗余 cron 触发时，若今天报告已存在且合格，直接跳过避免重复计算。"""
+    filepath = os.path.join("reports", f"daily_report_{date_str}.md")
+    if not os.path.exists(filepath):
+        return False
+    size = os.path.getsize(filepath)
+    if size < 1000:
+        return False
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            head = f.read(500)
+        # "数据未就绪" 标题说明上次触发时数据源未刷新，需要重试
+        if "数据未就绪" in head or "⚠️ ETF每日分析报告" in head:
+            return False
+        # 数据质量 < 50 也认为不合格，需要重试
+        m = __import__("re").search(r"数据质量[^\d]*(\d+)/100", head)
+        if m and int(m.group(1)) < 50:
+            return False
+        # 未刷新 ETF 超过 2 只也不合格，需要重试（虽然脚本会写"未就绪"报告，但双重保险）
+        if "数据时效性问题" in head:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def generate_report(target_date: str = None):
     now = datetime.now()
     print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] 云端报告生成...")
@@ -181,19 +208,29 @@ def generate_report(target_date: str = None):
         target_ts = pd.Timestamp(target_date)
         print(f"  补生成模式: {target_ts.strftime('%Y-%m-%d')}")
         expected_date = target_ts  # 期望最后交易日为指定日期
+        report_date_str = target_ts.strftime("%Y%m%d")
     else:
         target_ts = None
         print(f"  正常模式: 今日报告")
         # 期望最后交易日为今日（仅在交易日 15:30 后才合理）
         expected_date = pd.Timestamp(now.date())
         # 若今日是周末（周六/周日），则期望最后一个交易日为上周五
-        # GitHub Actions 在 UTC 12:00 = 北京时间 20:00 运行，已经过收盘时间
+        # GitHub Actions cron 现在 21:00~23:00 每 15 分钟触发一次
         weekday = now.weekday()
         if weekday == 5:  # 周六
             expected_date = pd.Timestamp(now.date()) - pd.Timedelta(days=1)  # 周五
         elif weekday == 6:  # 周日
             expected_date = pd.Timestamp(now.date()) - pd.Timedelta(days=2)  # 周五
+        report_date_str = expected_date.strftime("%Y%m%d")
     print(f"  期望最后交易日: {expected_date.strftime('%Y-%m-%d')}")
+
+    # === 冗余 cron 门禁：今天报告已生成且数据合格就直接跳过 ===
+    if not target_date and report_already_ready(report_date_str):
+        size = os.path.getsize(os.path.join("reports", f"daily_report_{report_date_str}.md"))
+        print(f"  ✅ 今日报告已存在且合格 ({size} bytes), 跳过生成")
+        print(f"  (cron 冗余触发机制: 本次无需重复执行)")
+        # 不生成 commit，git diff --staged --quiet 会直接退出不推送
+        return
 
     indicators = TechnicalIndicators()
     signal_generator = SignalGenerator()
@@ -318,7 +355,6 @@ def generate_report(target_date: str = None):
         print(f"  数据质量: {quality}/100")
     else:
         # 数据未就绪，生成明确的错误报告，避免"看起来正确但内容是昨日数据"的误导
-        import os
         os.makedirs("reports", exist_ok=True)
         date_str = target_date or datetime.now().strftime("%Y%m%d")
         if not etf_results:
@@ -370,7 +406,6 @@ def generate_report(target_date: str = None):
     # 调试：列出 reports/ 目录内容（跨平台）
     print("\n  === reports/ 目录内容 ===")
     try:
-        import os
         if os.path.exists("reports"):
             files = sorted(os.listdir("reports"))
             for f in files:
