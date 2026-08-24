@@ -6,7 +6,7 @@ name: ETF Daily Report
 on:
   # 定时触发：UTC 12:00 = 北京时间 20:00（A 股收盘后）
   schedule:
-    - cron: '0 12 * * 1-5'  # 周一到周五
+    - cron: '30 13 * * 1-5'  # 周一到周五
   # 手动触发（用于测试和补生成）
   workflow_dispatch:
     inputs:
