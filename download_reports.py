@@ -37,6 +37,45 @@ GITHUB_API_URL = f"https://api.github.com/repos/{REPO}/contents/reports/"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT_DIR = os.path.join(SCRIPT_DIR, "reports")
 
+# 日志文件（UTF-8 编码，由 Python 自己写入，避免 bat 重定向导致编码混乱）
+LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "sync.log")
+
+
+class TeeWriter:
+    """同时写入 stdout 和日志文件，统一 UTF-8 编码"""
+
+    def __init__(self, *writers):
+        self.writers = writers
+
+    def write(self, s):
+        for w in self.writers:
+            try:
+                w.write(s)
+                w.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for w in self.writers:
+            try:
+                w.flush()
+            except Exception:
+                pass
+
+
+def setup_logging():
+    """初始化日志：打开 sync.log（UTF-8 追加），重定向 stdout 到 Tee
+    返回 log_file 句柄，调用方需在结束时关闭"""
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    # 用 UTF-8 编码写入，避免 bat 重定向导致的 GBK/UTF-8 混乱
+    log_file = open(LOG_FILE, "a", encoding="utf-8")
+    log_file.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === Sync START ===\n")
+    log_file.flush()
+
+    # 同时输出到 stdout（屏幕）和 log_file（文件）
+    sys.stdout = TeeWriter(sys.__stdout__, log_file)
+    return log_file
+
 
 def download_from_mirror(url: str, local_path: str, timeout: int = 15) -> bool:
     """从单个镜像源下载，返回是否成功"""
@@ -237,12 +276,21 @@ def ensure_latest_report():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        # 下载指定日期
-        os.makedirs(REPORT_DIR, exist_ok=True)
-        download_report(sys.argv[1])
-    else:
-        # 下载最近 7 天
-        download_recent_reports(7)
-        # 兜底机制：若目标日期报告缺失，本地补跑
-        ensure_latest_report()
+    # 初始化 UTF-8 日志（替代 bat 的 echo + 重定向，避免编码混乱）
+    log_file = setup_logging()
+    try:
+        if len(sys.argv) > 1:
+            # 下载指定日期
+            os.makedirs(REPORT_DIR, exist_ok=True)
+            download_report(sys.argv[1])
+        else:
+            # 下载最近 7 天
+            download_recent_reports(7)
+            # 兜底机制：若目标日期报告缺失，本地补跑
+            ensure_latest_report()
+    except Exception as e:
+        print(f"  ❌ 执行异常: {type(e).__name__}: {e}")
+    finally:
+        log_file.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === Sync END ===\n")
+        log_file.flush()
+        log_file.close()
