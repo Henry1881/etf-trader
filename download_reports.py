@@ -155,11 +155,94 @@ def download_recent_reports(days: int = 7):
     return downloaded
 
 
+def get_fallback_target_date() -> str:
+    """计算兜底补生成的目标日期：
+    - 周一早上开机（<12点）：上周五（昨日是周末）
+    - 周六/周日开机：上周五
+    - 工作日早上（<12点）：昨日（昨日是工作日）
+    - 工作日晚上（>=12点）：今日（今日已收盘）
+    """
+    now = datetime.now()
+    today = now.date()
+    wd = today.weekday()  # 0=周一, 6=周日
+
+    if wd == 5:  # 周六
+        target = today - timedelta(days=1)      # 上周五
+    elif wd == 6:  # 周日
+        target = today - timedelta(days=2)      # 上周五
+    elif wd == 0 and now.hour < 12:  # 周一早上
+        target = today - timedelta(days=3)      # 上周五
+    elif now.hour < 12:  # 工作日早上
+        target = today - timedelta(days=1)      # 昨日
+    else:                # 工作日晚上
+        target = today                          # 今日
+
+    return target.strftime("%Y%m%d")
+
+
+def local_fallback_generate(date_str: str) -> bool:
+    """本地兜底生成：调用 generate_report_cloud.py 生成指定日期报告"""
+    gen_script = os.path.join(SCRIPT_DIR, "generate_report_cloud.py")
+    if not os.path.exists(gen_script):
+        print(f"  兜底脚本不存在: {gen_script}")
+        return False
+
+    print(f"\n=== 启动本地兜底生成: {date_str} ===")
+    try:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, gen_script, date_str],
+            cwd=SCRIPT_DIR,
+            timeout=600,  # 最多 10 分钟
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(f"  [stderr]: {result.stderr}")
+
+        # 检查是否生成成功
+        local_path = os.path.join(REPORT_DIR, f"daily_report_{date_str}.md")
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+            size = os.path.getsize(local_path)
+            print(f"  ✅ 兜底生成成功: {local_path} ({size} bytes)")
+            return True
+        else:
+            print(f"  ❌ 兜底生成失败: 报告未生成或过小")
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"  ❌ 兜底生成超时（>10分钟）")
+        return False
+    except Exception as e:
+        print(f"  ❌ 兜底生成异常: {type(e).__name__}: {e}")
+        return False
+
+
+def ensure_latest_report():
+    """兜底机制：确保目标日期报告存在，不存在则本地补跑。
+    这是云端 cron 9次冗余触发都漏跑时的"最后防线"。"""
+    target_date = get_fallback_target_date()
+    target_file = os.path.join(REPORT_DIR, f"daily_report_{target_date}.md")
+
+    if os.path.exists(target_file) and os.path.getsize(target_file) > 1000:
+        print(f"\n兜底检查: {target_date} 报告已存在 "
+              f"({os.path.getsize(target_file)} bytes)，无需补跑")
+        return
+
+    print(f"\n兜底检查: {target_date} 报告缺失，启动本地补跑...")
+    local_fallback_generate(target_date)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         # 下载指定日期
         os.makedirs(REPORT_DIR, exist_ok=True)
         download_report(sys.argv[1])
     else:
-        # 下载最近 7 天（扩大范围，确保补全缺失的报告）
+        # 下载最近 7 天
         download_recent_reports(7)
+        # 兜底机制：若目标日期报告缺失，本地补跑
+        ensure_latest_report()
